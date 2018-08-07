@@ -14,6 +14,7 @@ This template spins up the following resources:
 - one EC2 instance in each VPC to use for testing the tunnels
 - a Virtual Private Gateway (VGW) in the Cloud VPC
 - a Cisco CSR instance in the OnPrem VPC (to be used as the customer gateway - CGW)
+- a Lambda Custom Resource used to configure the Cisco CSR with the IPSec tunnels
 
 ## How to use
 
