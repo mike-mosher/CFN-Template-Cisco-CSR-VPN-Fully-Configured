@@ -1,0 +1,661 @@
+Description: 'Launches two VPCs, with VGW / CGW / VPN.  Also configures CGW using Lambda'
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  CloudVPCCidrBlock:
+    Type: String
+    Description: 'The /16 CIDR block for the Cloud VPC (Format Example: 10.0.0.0/16)'
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 10.0.0.0/16
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.0\.0/16'
+    ConstraintDescription: Must be a valid IP CIDR block with a /16
+  OnPremVPCCidrBlock:
+    Type: String
+    Description: 'The /16 CIDR block for the On-Prem VPC (Format Example: 172.31.0.0/16)'
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 172.31.0.0/16
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.0\.0/16'
+    ConstraintDescription: Must be a valid IP CIDR block with a /16
+  KeyPair:
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    Description: The name of an Amazon EC2 key pair in the region in which you are creating a CloudFormation stack.
+  AmazonLinuxAMIVersion:
+    Type: String
+    Default: AmazonLinuxAMI
+    AllowedValues:
+      - AmazonLinuxAMI
+      - AmazonLinux2AMI
+  CiscoCsrUsername:
+    Type: String
+    Default: cisco
+  CiscoCsrPassword:
+    Type: String
+    Default: cisco
+  S3Bucket:
+    Type: String
+  S3Key:
+    Type: String
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: Network CIDR Blocks
+        Parameters:
+          - OnPremVPCCidrBlock
+          - CloudVPCCidrBlock
+      -
+        Label:
+          default: Amazon EC2 Configuration
+        Parameters:
+          - AmazonLinuxAMIVersion
+          - KeyPair
+      -
+        Label:
+          default: Cisco CSR Configuration
+        Parameters:
+          - CiscoCsrUsername
+          - CiscoCsrPassword
+      -
+        Label:
+          default: S3 Bucket for Lambda Function
+        Parameters:
+          - S3Bucket
+          - S3Key
+    ParameterLabels:
+      OnPremVPCCidrBlock:
+        default: CIDR Block for OnPrem VPC (CGW-side)
+      CloudVPCCidrBlock:
+        default: CIDR Block for Cloud VPC (VGW-side)
+      AmazonLinuxAMIVersion:
+        default: Which Amazon Linux version to use
+      CiscoCsrUsername:
+        default: Username for Cisco CSR (CGW)
+      CiscoCsrPassword:
+        default: Password for Cisco CSR (CGW)
+      S3Bucket:
+        default: S3 Bucket for Lambda Function
+      S3Key:
+        default: S3 Key for Lambda Function
+
+Mappings:
+  AmazonLinuxAMI:
+    ap-south-1:
+      hvm: ami-d5c18eba
+    eu-west-3:
+      hvm: ami-dd8b3ca0
+    eu-west-2:
+      hvm: ami-e7d6c983
+    eu-west-1:
+      hvm: ami-1a962263
+    ap-northeast-2:
+      hvm: ami-1196317f
+    ap-northeast-1:
+      hvm: ami-da9e2cbc
+    sa-east-1:
+      hvm: ami-286f2a44
+    ca-central-1:
+      hvm: ami-d29e25b6
+    ap-southeast-1:
+      hvm: ami-c63d6aa5
+    ap-southeast-2:
+      hvm: ami-ff4ea59d
+    eu-central-1:
+      hvm: ami-bf2ba8d0
+    us-east-1:
+      hvm: ami-55ef662f
+    us-east-2:
+      hvm: ami-15e9c770
+    us-west-1:
+      hvm: ami-a51f27c5
+    us-west-2:
+      hvm: ami-bf4193c7
+  AmazonLinux2AMI:
+    ap-south-1:
+      hvm: ami-79c78f16
+    eu-west-3:
+      hvm: ami-185fe865
+    eu-west-2:
+      hvm: ami-424c5526
+    eu-west-1:
+      hvm: ami-b09e1ac9
+    ap-northeast-2:
+      hvm: ami-1559ff7b
+    ap-northeast-1:
+      hvm: ami-2a34b64c
+    sa-east-1:
+      hvm: ami-bd87c1d1
+    ca-central-1:
+      hvm: ami-9ab802fe
+    ap-southeast-1:
+      hvm: ami-b45030c8
+    ap-southeast-2:
+      hvm: ami-71867013
+    eu-central-1:
+      hvm: ami-29ae2546
+    us-east-1:
+      hvm: ami-2452275e
+    us-east-2:
+      hvm: ami-e97c548c
+    us-west-1:
+      hvm: ami-ee03078e
+    us-west-2:
+      hvm: ami-7707a10f
+  CiscoCsrBYOL:
+    eu-west-1:
+        hvm: ami-7bc56502
+    ap-northeast-2:
+        hvm: ami-e2b6128c
+    ap-northeast-1:
+        hvm: ami-cbf659ad
+    ap-southeast-1:
+        hvm: ami-f0d19c93
+    ap-southeast-2:
+        hvm: ami-2623cd44
+    eu-central-1:
+        hvm: ami-b92faad6
+    us-east-1:
+        hvm: ami-7657fc0c
+    us-east-2:
+        hvm: ami-8a0d22ef
+    us-west-1:
+        hvm: ami-b0320dd0
+    us-west-2:
+        hvm: ami-2c3ef554
+
+Resources:
+
+  # Cloud VPC (for VGW)
+  CloudVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: !Ref CloudVPCCidrBlock
+      InstanceTenancy: default
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: Cloud-VPC
+  CloudVPCPublicSn1Az1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: !Select [0, !Cidr [!GetAtt 'CloudVPC.CidrBlock', 256, 8]]
+      AvailabilityZone: !Select
+        - '0'
+        - !GetAZs
+          Ref: 'AWS::Region'
+      VpcId: !Ref CloudVPC
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Cloud-VPC-Pub-SN-1-AZ-1
+  CloudVPCPubRt1:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref CloudVPC
+      Tags:
+        - Key: Name
+          Value: Cloud-VPC-Pub-RT-1
+  CloudVPCPubSn1RtAssoc:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref CloudVPCPubRt1
+      SubnetId: !Ref CloudVPCPublicSn1Az1
+  CloudVPCIGW:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Cloud-VPC-IGW
+  CloudVPCIGWAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref CloudVPC
+      InternetGatewayId: !Ref CloudVPCIGW
+  CloudVPCPublicDefaultRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref CloudVPCPubRt1
+      GatewayId: !Ref CloudVPCIGW
+  CloudVPCPublicRouteToOnPrem:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: !Ref OnPremVPCCidrBlock
+      RouteTableId: !Ref CloudVPCPubRt1
+      GatewayId: !Ref CloudVpcVgw
+    DependsOn:
+      - CloudVpcVgwAttachment
+  CloudVPCPubInstSshSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: CloudVPCPubInstSshSG
+      GroupDescription: SSH Traffic from Everywhere
+      VpcId: !Ref CloudVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH from Everywhere
+      Tags:
+        - Key: Name
+          Value: 'Cloud-VPC--Pub-Inst-SSH-SG'
+  CloudVPCAllTrafficFromOnPremSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: CloudVPCAllTrafficFromOnPremSG
+      GroupDescription: VPN Traffic from OnPremVPC CIDR
+      VpcId: !Ref CloudVPC
+      SecurityGroupIngress:
+        - IpProtocol: '-1'
+          CidrIp: !Ref OnPremVPCCidrBlock
+          Description: All Traffic from OnPremVPC CIDR
+      Tags:
+        - Key: Name
+          Value: Cloud-VPC-AllTrafficFromOnPrem-SG
+    DependsOn: OnPremVPC
+  CloudVPCPubInstance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      DisableApiTermination: false
+      InstanceInitiatedShutdownBehavior: stop
+      ImageId: !FindInMap
+        - !Ref AmazonLinuxAMIVersion
+        - !Ref 'AWS::Region'
+        - hvm
+      InstanceType: t2.micro
+      KeyName: !Ref KeyPair
+      Monitoring: false
+      Tags:
+        - Key: Name
+          Value: 'Cloud-VPC--Case-Public-Inst'
+      NetworkInterfaces:
+        - DeleteOnTermination: true
+          Description: Primary network interface
+          DeviceIndex: '0'
+          SubnetId: !Ref CloudVPCPublicSn1Az1
+          GroupSet:
+            - !Ref CloudVPCPubInstSshSG
+            - !Ref CloudVPCAllTrafficFromOnPremSG
+          AssociatePublicIpAddress: true
+  CloudVpcVgw:
+    Type: "AWS::EC2::VPNGateway"
+    Properties:
+      AmazonSideAsn: 64512
+      Type: "ipsec.1"
+      Tags:
+        - Key: Name
+          Value: 'Cloud-VPC-VGW'
+  CloudVpcCgw:
+    Type: "AWS::EC2::CustomerGateway"
+    Properties:
+      BgpAsn: 64513
+      IpAddress: !Ref OnPremVPCCGWEIP
+      Type: "ipsec.1"
+      Tags:
+        - Key: Name
+          Value: 'Cloud-VPC-CGW'
+    DependsOn:
+      - OnPremVPCCGW
+  CloudVpcVgwAttachment:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      VpcId: !Ref CloudVPC
+      VpnGatewayId: !Ref CloudVpcVgw
+  CloudVPCVPN:
+    Type: "AWS::EC2::VPNConnection"
+    Properties:
+      Type: "ipsec.1"
+      CustomerGatewayId: !Ref CloudVpcCgw
+      VpnGatewayId: !Ref CloudVpcVgw
+      StaticRoutesOnly: false
+      Tags:
+        - Key: Name
+          Value: 'Cloud-VPC-VPN'
+  CloudVPCVPNRoutePropagation:
+    Type: "AWS::EC2::VPNGatewayRoutePropagation"
+    Properties:
+      RouteTableIds:
+        - !Ref CloudVPCPubRt1
+      VpnGatewayId: !Ref CloudVpcVgw
+    DependsOn:
+      - CloudVpcVgwAttachment
+
+
+  # On-Prem VPC (For CGW)
+  OnPremVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: !Ref OnPremVPCCidrBlock
+      InstanceTenancy: default
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: OnPrem-VPC
+  OnPremVPCPublicSn1Az1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: !Select [0, !Cidr [!GetAtt 'OnPremVPC.CidrBlock', 256, 8]]
+      AvailabilityZone: !Select
+        - '0'
+        - !GetAZs
+          Ref: 'AWS::Region'
+      VpcId: !Ref OnPremVPC
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: OnPrem-VPC-Pub-SN-1-AZ-1
+  OnPremVPCPubRt1:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref OnPremVPC
+      Tags:
+        - Key: Name
+          Value: OnPrem-VPC-Pub-RT-1
+  OnPremVPCPubSn1RtAssoc:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref OnPremVPCPubRt1
+      SubnetId: !Ref OnPremVPCPublicSn1Az1
+  OnPremVPCPrivateSn1Az1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: !Select [1, !Cidr [!GetAtt 'OnPremVPC.CidrBlock', 256, 8]]
+      AvailabilityZone: !Select
+        - '0'
+        - !GetAZs
+          Ref: 'AWS::Region'
+      VpcId: !Ref OnPremVPC
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: OnPrem-VPC-Priv-SN-1-AZ-1
+  OnPremVPCPrivateRt1:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref OnPremVPC
+      Tags:
+        - Key: Name
+          Value: OnPrem-VPC-Priv-RT-1
+  OnPremVPCPrivateSn1RtAssoc:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref OnPremVPCPrivateRt1
+      SubnetId: !Ref OnPremVPCPrivateSn1Az1
+  OnPremVPCNatGWEip1:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: OnPremVPC
+    DependsOn: OnPremVPC
+  OnPremVPCNatGW:
+    Type: 'AWS::EC2::NatGateway'
+    Properties:
+      AllocationId:
+        'Fn::GetAtt':
+          - OnPremVPCNatGWEip1
+          - AllocationId
+      SubnetId:
+        Ref: OnPremVPCPublicSn1Az1
+  OnPremVPCPrivateDefaultRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId:
+        Ref: OnPremVPCPrivateRt1
+      NatGatewayId:
+        Ref: OnPremVPCNatGW
+  OnPremVPCIGW:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: OnPrem-VPC-IGW
+  OnPremVPCIGWAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref OnPremVPC
+      InternetGatewayId: !Ref OnPremVPCIGW
+  OnPremVPCPublicDefaultRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref OnPremVPCPubRt1
+      GatewayId: !Ref OnPremVPCIGW
+    DependsOn:
+      - OnPremVPCIGWAttachment
+  OnPremVPCPublicCloudVPCRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: !Ref CloudVPCCidrBlock
+      RouteTableId: !Ref OnPremVPCPubRt1
+      InstanceId: !Ref OnPremVPCCGW
+  OnPremVPCPubInstSshSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: OnPremVPCPubInstSshSG
+      GroupDescription: SSH Traffic from Everywhere
+      VpcId: !Ref OnPremVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH from Everywhere
+      Tags:
+        - Key: Name
+          Value: OnPrem-VPC-Pub-Inst-SG
+  OnPremVPCVPCOnlySshSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: OnPremVPCVPCOnlySshSG
+      GroupDescription: SSH Traffic from VPC CIDR
+      VpcId: !Ref OnPremVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref OnPremVPCCidrBlock
+          Description: SSH from VPC CIDR
+      Tags:
+        - Key: Name
+          Value: OnPrem-VPC-VPN-SG
+  OnPremVPCPubInstVpnSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: OnPremVPCPubInstVpnSG
+      GroupDescription: VPN Traffic from Everyone
+      VpcId: !Ref OnPremVPC
+      SecurityGroupIngress:
+        - IpProtocol: udp
+          FromPort: 500
+          ToPort: 500
+          CidrIp: 0.0.0.0/0
+          Description: ISAKMP from Everyone
+        - IpProtocol: udp
+          FromPort: 4500
+          ToPort: 4500
+          CidrIp: 0.0.0.0/0
+          Description: NAT-T from Everyone
+        - IpProtocol: '50'
+          CidrIp: 0.0.0.0/0
+          Description: ESP from Everyone
+      Tags:
+        - Key: Name
+          Value: OnPrem-VPC-VPN-SG
+  OnPremVPCAllTrafficFromOnPremSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: OnPremVPCAllTrafficFromOnPremSG
+      GroupDescription: VPN Traffic from OnPremVPC CIDR
+      VpcId: !Ref OnPremVPC
+      SecurityGroupIngress:
+        - IpProtocol: '-1'
+          CidrIp: !Ref OnPremVPCCidrBlock
+          Description: All Traffic from OnPremVPC CIDR
+      Tags:
+        - Key: Name
+          Value: OnPrem-VPC-AllTrafficFromOnPrem-SG
+  OnPremVPCAllTrafficFromCloudSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: OnPremVPCAllTrafficFromCloudSG
+      GroupDescription: VPN Traffic from CloudVPC CIDR
+      VpcId: !Ref OnPremVPC
+      SecurityGroupIngress:
+        - IpProtocol: '-1'
+          CidrIp: !Ref CloudVPCCidrBlock
+          Description: All Traffic from CloudVPC CIDR
+      Tags:
+        - Key: Name
+          Value: OnPrem-VPC-AllTrafficFromOnPrem-SG
+  OnPremVPCPubInstance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      DisableApiTermination: false
+      InstanceInitiatedShutdownBehavior: stop
+      ImageId: !FindInMap
+        - !Ref AmazonLinuxAMIVersion
+        - !Ref 'AWS::Region'
+        - hvm
+      InstanceType: t2.micro
+      KeyName: !Ref KeyPair
+      Monitoring: false
+      Tags:
+        - Key: Name
+          Value: 'OnPrem-VPC--Case-Public-Inst'
+      NetworkInterfaces:
+        - DeleteOnTermination: true
+          Description: Primary network interface
+          DeviceIndex: '0'
+          SubnetId: !Ref OnPremVPCPublicSn1Az1
+          GroupSet:
+            - !Ref OnPremVPCPubInstSshSG
+            - !Ref OnPremVPCAllTrafficFromCloudSG
+            - !Ref OnPremVPCAllTrafficFromOnPremSG
+          AssociatePublicIpAddress: true
+  OnPremVPCCGW:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      DisableApiTermination: false
+      InstanceInitiatedShutdownBehavior: stop
+      ImageId: !FindInMap
+        - CiscoCsrBYOL
+        - !Ref 'AWS::Region'
+        - hvm
+      InstanceType: c4.large
+      KeyName: !Ref KeyPair
+      Monitoring: false
+      SourceDestCheck: false
+      Tags:
+        - Key: Name
+          Value: 'OnPrem-VPC-CSR-CGW'
+      NetworkInterfaces:
+        - DeleteOnTermination: true
+          Description: Primary network interface
+          DeviceIndex: '0'
+          SubnetId: !Ref OnPremVPCPublicSn1Az1
+          GroupSet:
+            - !Ref OnPremVPCPubInstSshSG
+            - !Ref OnPremVPCVPCOnlySshSG
+            - !Ref OnPremVPCPubInstVpnSG
+            - !Ref OnPremVPCAllTrafficFromOnPremSG
+          AssociatePublicIpAddress: true
+      UserData: !Base64
+        Fn::Sub:
+          - |
+            ios-config-1="username ${username} priv 15 pass ${password}"
+            ios-config-2="hostname OnPrem-VPC-CSR-CGW"
+          - { username: !Ref CiscoCsrUsername, password: !Ref CiscoCsrPassword }
+    DependsOn:
+      - OnPremVPCIGWAttachment
+  OnPremVPCCGWEIP:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      InstanceId: !Ref OnPremVPCCGW
+      Domain: OnPremVPC
+    DependsOn:
+      - OnPremVPC
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CFTLambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'ec2:CreateNetworkInterface'
+                  - 'ec2:DescribeNetworkInterfaces'
+                  - 'ec2:DeleteNetworkInterface'
+                  - 'ec2:*' # Adding for API calls
+                Resource: '*'
+  LambdaFunctionConfigureCGW:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref S3Bucket
+        S3Key: !Ref S3Key
+      Handler: LambdaFunction/function.handler
+      Runtime: python3.6
+      Timeout: 300
+      Role: !GetAtt
+        - LambdaExecutionRole
+        - Arn
+    DependsOn:
+      - OnPremVPCCGW
+      - OnPremVPCIGWAttachment
+      - CloudVPCVPN
+  LambdaFunctionConfigureCGWCustomResource:
+    Type: 'Custom::CustomResource'
+    Properties:
+      ServiceToken: !GetAtt
+        - LambdaFunctionConfigureCGW
+        - Arn
+      CGWPublicIp:
+        'Fn::GetAtt':
+          - OnPremVPCCGW
+          - PublicIp
+      CGWPrivateIp:
+        'Fn::GetAtt':
+          - OnPremVPCCGW
+          - PrivateIp
+      OnPremVPCCidrBlock: !Ref OnPremVPCCidrBlock
+      CloudVPCCidrBlock: !Ref CloudVPCCidrBlock
+      CiscoCsrUsername: !Ref CiscoCsrUsername
+      CiscoCsrPassword: !Ref CiscoCsrPassword
+      KeyPair: !Ref KeyPair
+      StackName: !Ref AWS::StackName
+      Region: !Ref AWS::Region
+    DependsOn:
+      - LambdaFunctionConfigureCGW
+      - CloudVPCVPN
+      - OnPremVPCVPCOnlySshSG
+      - OnPremVPCPrivateSn1Az1
+      - OnPremVPCPrivateRt1
+      - OnPremVPCPrivateSn1RtAssoc
+      - OnPremVPCNatGW
+      - OnPremVPCPrivateDefaultRoute
+      - OnPremVPCIGW
+      - OnPremVPCIGWAttachment
+      - OnPremVPCPublicSn1Az1
+      - OnPremVPCPublicDefaultRoute
+      - OnPremVPCPubSn1RtAssoc
+      - OnPremVPCPubRt1
+
